@@ -8,6 +8,8 @@
 #include <sstream>
 #include <functional>
 #include <memory>
+#include <cstdio>
+#include <cstdlib>
 
 #include "testbed.hpp"
 #include "data_utils.hpp"
@@ -15,12 +17,59 @@
 #include "verify.hpp"
 
 #ifdef HAS_DEEPGEMM
-extern void deepgemm_gemm(const __nv_bfloat16* A,
-                          const __nv_bfloat16* B,
-                          __nv_bfloat16* C,
-                          int M, int N, int K,
-                          int lda, int ldb, int ldc,
-                          int batchCount = 1);
+static std::string run_deepgemm_python(int M, int N, int K,
+                                         int warmup, int iterations) {
+    std::ostringstream cmd;
+    cmd << "python3 tools/run_deepgemm.py"
+        << " -M " << M << " -N " << N << " -K " << K
+        << " -warmup " << warmup << " -iter " << iterations
+        << " 2>/dev/null";
+    std::string result;
+    FILE* pipe = popen(cmd.str().c_str(), "r");
+    if (!pipe) return "";
+    char buf[512];
+    while (fgets(buf, sizeof(buf), pipe)) result += buf;
+    pclose(pipe);
+    if (result.empty()) return "";
+    auto start = result.find('{');
+    auto end   = result.rfind('}');
+    if (start == std::string::npos || end == std::string::npos) return "";
+    return result.substr(start, end - start + 1);
+}
+
+static KernelResult run_deepgemm(const TestConfig& cfg,
+                                  const DeviceInfo& info) {
+    KernelResult res;
+    res.name = "DeepGEMM";
+
+    std::string json = run_deepgemm_python(cfg.M, cfg.N, cfg.K,
+                                             cfg.warmup, cfg.iterations);
+    if (json.empty() || json.find("\"error\"") != std::string::npos) {
+        std::cerr << "  DeepGEMM: not available on this GPU (requires SM90+).\n";
+        return res;
+    }
+
+    auto get_val = [&](const std::string& key) -> double {
+        auto pos = json.find("\"" + key + "\"");
+        if (pos == std::string::npos) return 0.0;
+        pos = json.find(':', pos);
+        if (pos == std::string::npos) return 0.0;
+        pos++;
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+        char* end = nullptr;
+        double val = std::strtod(json.c_str() + pos, &end);
+        return val;
+    };
+
+    res.time_ms = get_val("time_ms");
+    res.gflops = get_val("gflops");
+    res.bandwidth_gbs = compute_bandwidth_gbs(cfg.M, cfg.N, cfg.K, res.time_ms);
+    res.compute_util_pct = compute_utilization(res.gflops,
+                                                info.theoretical_peak_gflops);
+    res.bandwidth_util_pct = compute_bandwidth_utilization(
+        res.bandwidth_gbs, info.theoretical_peak_bandwidth_gbs);
+    return res;
+}
 #endif
 
 static void print_usage(const char* prog) {
@@ -127,40 +176,6 @@ static KernelResult run_cublas(const TestConfig& cfg,
     hC_ref = copy_to_host(bufs.dC, bufs.size_C);
     return res;
 }
-
-#ifdef HAS_DEEPGEMM
-static KernelResult run_deepgemm(const TestConfig& cfg,
-                                  const DeviceInfo& info,
-                                  const DeviceBuffers& bufs) {
-    KernelResult res;
-    res.name = "DeepGEMM";
-
-    auto launch = [&]() {
-        deepgemm_gemm(bufs.dA, bufs.dB, bufs.dC,
-                      cfg.M, cfg.N, cfg.K,
-                      cfg.M, cfg.K, cfg.M, 1);
-    };
-
-    for (int w = 0; w < cfg.warmup; ++w) {
-        zero_device(bufs.dC, bufs.size_C);
-        launch();
-    }
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    res.time_ms = measure_kernel_time_ms_prepare(
-        [&]() { zero_device(bufs.dC, bufs.size_C); },
-        launch,
-        cfg.iterations);
-
-    res.gflops = compute_gflops(cfg.M, cfg.N, cfg.K, res.time_ms);
-    res.bandwidth_gbs = compute_bandwidth_gbs(cfg.M, cfg.N, cfg.K, res.time_ms);
-    res.compute_util_pct = compute_utilization(res.gflops,
-                                                info.theoretical_peak_gflops);
-    res.bandwidth_util_pct = compute_bandwidth_utilization(
-        res.bandwidth_gbs, info.theoretical_peak_bandwidth_gbs);
-    return res;
-}
-#endif
 
 static KernelResult run_user_kernel(const TestConfig& cfg,
                                      const DeviceInfo& info,
@@ -295,13 +310,16 @@ int main(int argc, char* argv[]) {
 
 #ifndef HAS_DEEPGEMM
         if (!cfg.skip_deepgemm) {
-            std::cout << "  DeepGEMM: library not linked. Skipping.\n";
+            std::cout << "  DeepGEMM: not enabled (build with DEEPGEMM=1). Skipping.\n";
         }
 #else
         if (!cfg.skip_deepgemm) {
             std::cout << "  Running DeepGEMM baseline ..." << std::flush;
-            results.push_back(run_deepgemm(cfg, info, bufs));
-            std::cout << " done.\n";
+            auto dg_res = run_deepgemm(cfg, info);
+            if (dg_res.time_ms > 0.0) {
+                results.push_back(dg_res);
+                std::cout << " done.\n";
+            }
         }
 #endif
 
