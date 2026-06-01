@@ -35,7 +35,8 @@ struct KernelResult {
     double time_ms = 0.0;
     double gflops = 0.0;
     double bandwidth_gbs = 0.0;
-    double utilization_pct = 0.0;
+    double compute_util_pct = 0.0;
+    double bandwidth_util_pct = 0.0;
 };
 
 struct CorrectnessResult {
@@ -48,6 +49,7 @@ struct DeviceInfo {
     int sm_count = 0;
     int clock_rate_khz = 0;
     double theoretical_peak_gflops = 0.0;
+    double theoretical_peak_bandwidth_gbs = 0.0;
     std::string name;
 };
 
@@ -64,7 +66,10 @@ inline DeviceInfo query_device_info(int device_id = 0) {
     info.clock_rate_khz = prop.clockRate;
     double clock_rate_hz = static_cast<double>(info.clock_rate_khz) * 1000.0;
     info.theoretical_peak_gflops =
-        static_cast<double>(info.sm_count) * clock_rate_hz * 1024.0 / 1e9; // dense not 1:2 spares
+        static_cast<double>(info.sm_count) * clock_rate_hz * 1024.0 / 1e9;
+    double mem_clock_hz = static_cast<double>(prop.memoryClockRate) * 1000.0;
+    info.theoretical_peak_bandwidth_gbs =
+        mem_clock_hz * (prop.memoryBusWidth / 8.0) * 2.0 / 1e9;
     return info;
 }
 
@@ -86,4 +91,10 @@ inline double compute_utilization(double measured_gflops,
                                    double theoretical_peak_gflops) {
     if (theoretical_peak_gflops <= 0.0) return 0.0;
     return (measured_gflops / theoretical_peak_gflops) * 100.0;
+}
+
+inline double compute_bandwidth_utilization(double measured_bw_gbs,
+                                              double theoretical_peak_bw_gbs) {
+    if (theoretical_peak_bw_gbs <= 0.0) return 0.0;
+    return (measured_bw_gbs / theoretical_peak_bw_gbs) * 100.0;
 }

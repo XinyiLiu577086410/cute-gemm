@@ -85,6 +85,9 @@ static void print_header(const TestConfig& cfg, const DeviceInfo& info) {
     std::cout << "  Theoretical Peak BF16: "
               << std::fixed << std::setprecision(1)
               << info.theoretical_peak_gflops << " GFLOPS\n";
+    std::cout << "  Theoretical Peak BW:   "
+              << std::fixed << std::setprecision(1)
+              << info.theoretical_peak_bandwidth_gbs << " GB/s\n";
     std::cout << "================================================================================\n\n";
 }
 
@@ -114,8 +117,10 @@ static KernelResult run_cublas(const TestConfig& cfg,
     res.time_ms = measure_kernel_time_ms(launch, cfg.warmup, cfg.iterations);
     res.gflops = compute_gflops(cfg.M, cfg.N, cfg.K, res.time_ms);
     res.bandwidth_gbs = compute_bandwidth_gbs(cfg.M, cfg.N, cfg.K, res.time_ms);
-    res.utilization_pct = compute_utilization(res.gflops,
-                                               info.theoretical_peak_gflops);
+    res.compute_util_pct = compute_utilization(res.gflops,
+                                                info.theoretical_peak_gflops);
+    res.bandwidth_util_pct = compute_bandwidth_utilization(
+        res.bandwidth_gbs, info.theoretical_peak_bandwidth_gbs);
 
     hC_ref = copy_to_host(bufs.dC, bufs.size_C);
     return res;
@@ -147,8 +152,10 @@ static KernelResult run_deepgemm(const TestConfig& cfg,
 
     res.gflops = compute_gflops(cfg.M, cfg.N, cfg.K, res.time_ms);
     res.bandwidth_gbs = compute_bandwidth_gbs(cfg.M, cfg.N, cfg.K, res.time_ms);
-    res.utilization_pct = compute_utilization(res.gflops,
-                                               info.theoretical_peak_gflops);
+    res.compute_util_pct = compute_utilization(res.gflops,
+                                                info.theoretical_peak_gflops);
+    res.bandwidth_util_pct = compute_bandwidth_utilization(
+        res.bandwidth_gbs, info.theoretical_peak_bandwidth_gbs);
     return res;
 }
 #endif
@@ -177,8 +184,10 @@ static KernelResult run_user_kernel(const TestConfig& cfg,
 
     res.gflops = compute_gflops(cfg.M, cfg.N, cfg.K, res.time_ms);
     res.bandwidth_gbs = compute_bandwidth_gbs(cfg.M, cfg.N, cfg.K, res.time_ms);
-    res.utilization_pct = compute_utilization(res.gflops,
-                                               info.theoretical_peak_gflops);
+    res.compute_util_pct = compute_utilization(res.gflops,
+                                                info.theoretical_peak_gflops);
+    res.bandwidth_util_pct = compute_bandwidth_utilization(
+        res.bandwidth_gbs, info.theoretical_peak_bandwidth_gbs);
 
     hC_user = copy_to_host(bufs.dC, bufs.size_C);
     return res;
@@ -191,8 +200,9 @@ static void print_results_table(const std::vector<KernelResult>& results) {
               << std::setw(12) << "Time(ms)"
               << std::setw(14) << "GFLOPS"
               << std::setw(14) << "BW(GB/s)"
-              << std::setw(14) << "Util(%)\n";
-    std::cout << "  " << std::string(70, '-') << "\n";
+              << std::setw(14) << "CompUtil(%)"
+              << std::setw(14) << "BWUtil(%)\n";
+    std::cout << "  " << std::string(84, '-') << "\n";
 
     for (const auto& r : results) {
         std::cout << "  " << std::left << std::setw(16) << r.name
@@ -200,7 +210,9 @@ static void print_results_table(const std::vector<KernelResult>& results) {
                   << std::setprecision(4) << std::setw(12) << r.time_ms
                   << std::setprecision(2) << std::setw(14) << r.gflops
                   << std::setprecision(2) << std::setw(14) << r.bandwidth_gbs
-                  << std::setprecision(1) << std::setw(13) << r.utilization_pct
+                  << std::setprecision(1) << std::setw(13) << r.compute_util_pct
+                  << "%"
+                  << std::setprecision(1) << std::setw(13) << r.bandwidth_util_pct
                   << "%\n";
     }
     std::cout << "\n";
