@@ -1,3 +1,6 @@
 [submodule "cutlass"]
 	path = cutlass
 	url = git@github.com:NVIDIA/cutlass
+[submodule "deepgemm"]
+	path = deepgemm
+	url = https://github.com/deepseek-ai/DeepGEMM.git
