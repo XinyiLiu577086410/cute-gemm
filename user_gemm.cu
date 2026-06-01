@@ -5,23 +5,17 @@
 
 using namespace nvcuda;
 
-constexpr int kTileM  = 64;
-constexpr int kTileN  = 64;
-constexpr int kTileK  = 64;
-constexpr int kWmmaM  = 16;
-constexpr int kWmmaN  = 16;
-constexpr int kWmmaK  = 16;
-constexpr int kWarpSize = 32;
-constexpr int kWarpsM = 2;
-constexpr int kWarpsN = 2;
-constexpr int kThreadsPerBlock = kWarpSize * kWarpsM * kWarpsN;
-
-__global__ __launch_bounds__(kThreadsPerBlock)
+template <int kTileM,  int kTileN,  int kTileK,
+          int kWmmaM,  int kWmmaN,  int kWmmaK,
+          int kWarpSize, int kWarpsM, int kWarpsN>
+__global__ __launch_bounds__(kWarpSize * kWarpsM * kWarpsN)
 void gemm_bf16_kernel(const __nv_bfloat16* __restrict__ A,
                       const __nv_bfloat16* __restrict__ B,
                       __nv_bfloat16* __restrict__ C,
                       int M, int N, int K)
 {
+    constexpr int kThreads = kWarpSize * kWarpsM * kWarpsN;
+
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
@@ -35,7 +29,6 @@ void gemm_bf16_kernel(const __nv_bfloat16* __restrict__ A,
     __shared__ float        smem_C[kTileM * kTileN];
 
     int tid = threadIdx.x;
-    int num_threads = blockDim.x;
     int warp_id = tid / kWarpSize;
     int warp_m  = warp_id / kWarpsN;
     int warp_n  = warp_id % kWarpsN;
@@ -55,7 +48,7 @@ void gemm_bf16_kernel(const __nv_bfloat16* __restrict__ A,
 
     for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
 
-        for (int i = tid; i < kTileM * kTileK; i += num_threads) {
+        for (int i = tid; i < kTileM * kTileK; i += kThreads) {
             int m = i / kTileK;
             int k = i % kTileK;
             int a_row = a_off_m + m;
@@ -67,7 +60,7 @@ void gemm_bf16_kernel(const __nv_bfloat16* __restrict__ A,
             }
         }
 
-        for (int i = tid; i < kTileK * kTileN; i += num_threads) {
+        for (int i = tid; i < kTileK * kTileN; i += kThreads) {
             int k = i / kTileN;
             int n = i % kTileN;
             int b_row = k_tile + k;
@@ -118,7 +111,7 @@ void gemm_bf16_kernel(const __nv_bfloat16* __restrict__ A,
 
     __syncthreads();
 
-    for (int i = tid; i < kTileM * kTileN; i += num_threads) {
+    for (int i = tid; i < kTileM * kTileN; i += kThreads) {
         int m = i / kTileN;
         int n = i % kTileN;
         int c_row = c_off_m + m;
@@ -133,16 +126,23 @@ extern "C" void user_gemm(const __nv_bfloat16* dA,
                           const __nv_bfloat16* dB,
                           __nv_bfloat16* dC,
                           int M, int N, int K) {
+    constexpr int kTileM = 64, kTileN = 64, kTileK = 64;
+    constexpr int kWmmaM = 16, kWmmaN = 16, kWmmaK = 16;
+    constexpr int kWarpSize = 32, kWarpsM = 2, kWarpsN = 2;
+
     if (M % kTileM != 0 || N % kTileN != 0 || K % kTileK != 0) {
         fprintf(stderr, "[user_gemm] ERROR: M,N,K must be multiples of %d. "
                 "Got M=%d N=%d K=%d\n", kTileM, M, N, K);
         return;
     }
 
-    dim3 block(kThreadsPerBlock);
+    dim3 block(kWarpSize * kWarpsM * kWarpsN);
     dim3 grid(M / kTileM, N / kTileN);
 
-    gemm_bf16_kernel<<<grid, block>>>(dA, dB, dC, M, N, K);
+    gemm_bf16_kernel<kTileM, kTileN, kTileK,
+                     kWmmaM, kWmmaN, kWmmaK,
+                     kWarpSize, kWarpsM, kWarpsN>
+        <<<grid, block>>>(dA, dB, dC, M, N, K);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
