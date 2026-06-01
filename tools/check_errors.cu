@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 
+constexpr size_t kElemSize = sizeof(__nv_bfloat16);
+
 #define CUDA_CHECK(call)                                                       \
     do {                                                                        \
         cudaError_t e = (call);                                                 \
@@ -41,6 +43,9 @@ int main(int argc, char* argv[]) {
     }
 
     size_t szA = (size_t)M * K, szB = (size_t)K * N, szC = (size_t)M * N;
+    size_t bytesA = szA * kElemSize, bytesB = szB * kElemSize;
+    size_t bytesC = szC * kElemSize;
+
     std::vector<__nv_bfloat16> hA(szA), hB(szB);
 
     std::mt19937 rngA(seedA), rngB(seedB);
@@ -49,32 +54,30 @@ int main(int argc, char* argv[]) {
     for (size_t i = 0; i < szB; i++) hB[i] = __float2bfloat16(dist(rngB));
 
     __nv_bfloat16 *dA, *dB, *dC_cublas, *dC_user;
-    CUDA_CHECK(cudaMalloc(&dA, szA * 2));
-    CUDA_CHECK(cudaMalloc(&dB, szB * 2));
-    CUDA_CHECK(cudaMalloc(&dC_cublas, szC * 2));
-    CUDA_CHECK(cudaMalloc(&dC_user, szC * 2));
-    CUDA_CHECK(cudaMemcpy(dA, hA.data(), szA * 2, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dB, hB.data(), szB * 2, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&dA, bytesA));
+    CUDA_CHECK(cudaMalloc(&dB, bytesB));
+    CUDA_CHECK(cudaMalloc(&dC_cublas, bytesC));
+    CUDA_CHECK(cudaMalloc(&dC_user, bytesC));
+    CUDA_CHECK(cudaMemcpy(dA, hA.data(), bytesA, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dB, hB.data(), bytesB, cudaMemcpyHostToDevice));
 
     cublasHandle_t handle;
     CUBLAS_CHECK(cublasCreate(&handle));
     float alpha = 1.0f, beta = 0.0f;
-    CUDA_CHECK(cudaMemset(dC_cublas, 0, szC * 2));
+    CUDA_CHECK(cudaMemset(dC_cublas, 0, bytesC));
     CUBLAS_CHECK(cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K,
                                &alpha, dA, CUDA_R_16BF, M, dB, CUDA_R_16BF, K,
                                &beta, dC_cublas, CUDA_R_16BF, M,
                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     CUBLAS_CHECK(cublasDestroy(handle));
 
-    CUDA_CHECK(cudaMemset(dC_user, 0, szC * 2));
+    CUDA_CHECK(cudaMemset(dC_user, 0, bytesC));
     user_gemm(dA, dB, dC_user, M, N, K);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<__nv_bfloat16> hC_ref(szC), hC_user(szC);
-    CUDA_CHECK(
-        cudaMemcpy(hC_ref.data(), dC_cublas, szC * 2, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(
-        cudaMemcpy(hC_user.data(), dC_user, szC * 2, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hC_ref.data(), dC_cublas, bytesC, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hC_user.data(), dC_user, bytesC, cudaMemcpyDeviceToHost));
 
     float max_abs = 0.0f, max_rel = 0.0f;
     int cnt_01 = 0, cnt_05 = 0, cnt_1 = 0, cnt_10 = 0;
@@ -89,8 +92,8 @@ int main(int argc, char* argv[]) {
             if (re > max_rel) max_rel = re;
         }
         if (ae > 0.01) cnt_01++;
-        if (ae > 0.5) cnt_05++;
-        if (ae > 1.0) cnt_1++;
+        if (ae > 0.5)  cnt_05++;
+        if (ae > 1.0)  cnt_1++;
         if (ae > 10.0) cnt_10++;
     }
 
@@ -99,7 +102,7 @@ int main(int argc, char* argv[]) {
     printf("MaxRelErr = %.2f\n", max_rel);
     printf("AE > 0.01: %d (%.2f%%)\n", cnt_01, 100.0 * cnt_01 / szC);
     printf("AE > 0.50: %d (%.2f%%)\n", cnt_05, 100.0 * cnt_05 / szC);
-    printf("AE > 1.00: %d (%.2f%%)\n", cnt_1, 100.0 * cnt_1 / szC);
+    printf("AE > 1.00: %d (%.2f%%)\n", cnt_1,  100.0 * cnt_1  / szC);
     printf("AE > 10.0: %d (%.2f%%)\n", cnt_10, 100.0 * cnt_10 / szC);
 
     CUDA_CHECK(cudaFree(dA));

@@ -8,6 +8,8 @@
 #include <iostream>
 #include <cstring>
 
+constexpr size_t kElemSize = sizeof(__nv_bfloat16);
+
 #define CUDA_CHECK(call)                                                        \
     do {                                                                        \
         cudaError_t _err = (call);                                              \
@@ -41,14 +43,14 @@ inline std::vector<__nv_bfloat16> generate_random_bf16(size_t count,
 
 inline __nv_bfloat16* allocate_device(size_t count) {
     __nv_bfloat16* d_ptr = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_ptr, count * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_ptr, count * kElemSize));
     return d_ptr;
 }
 
 inline void copy_to_device(__nv_bfloat16* d_dst,
                             const std::vector<__nv_bfloat16>& h_src) {
     CUDA_CHECK(cudaMemcpy(d_dst, h_src.data(),
-                           h_src.size() * sizeof(__nv_bfloat16),
+                           h_src.size() * kElemSize,
                            cudaMemcpyHostToDevice));
 }
 
@@ -56,13 +58,13 @@ inline std::vector<__nv_bfloat16> copy_to_host(__nv_bfloat16* d_src,
                                                   size_t count) {
     std::vector<__nv_bfloat16> h_data(count);
     CUDA_CHECK(cudaMemcpy(h_data.data(), d_src,
-                           count * sizeof(__nv_bfloat16),
+                           count * kElemSize,
                            cudaMemcpyDeviceToHost));
     return h_data;
 }
 
 inline void zero_device(__nv_bfloat16* d_ptr, size_t count) {
-    CUDA_CHECK(cudaMemset(d_ptr, 0, count * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMemset(d_ptr, 0, count * kElemSize));
 }
 
 inline void free_device(__nv_bfloat16* d_ptr) {

@@ -5,50 +5,59 @@
 
 using namespace nvcuda;
 
-#define BLK_M 64
-#define BLK_N 64
-#define BLK_K 64
-#define WARP_SIZE 32
+constexpr int kTileM  = 64;
+constexpr int kTileN  = 64;
+constexpr int kTileK  = 64;
+constexpr int kWmmaM  = 16;
+constexpr int kWmmaN  = 16;
+constexpr int kWmmaK  = 16;
+constexpr int kWarpSize = 32;
+constexpr int kWarpsM = 2;
+constexpr int kWarpsN = 2;
+constexpr int kThreadsPerBlock = kWarpSize * kWarpsM * kWarpsN;
 
-__global__ void gemm_bf16_64x64x64_kernel(
-    const __nv_bfloat16* __restrict__ A,
-    const __nv_bfloat16* __restrict__ B,
-    __nv_bfloat16* __restrict__ C,
-    int M, int N, int K)
+__global__ __launch_bounds__(kThreadsPerBlock)
+void gemm_bf16_kernel(const __nv_bfloat16* __restrict__ A,
+                      const __nv_bfloat16* __restrict__ B,
+                      __nv_bfloat16* __restrict__ C,
+                      int M, int N, int K)
 {
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    int a_off_m = bx * BLK_M;
-    int b_off_n = by * BLK_N;
-    int c_off_m = bx * BLK_M;
-    int c_off_n = by * BLK_N;
+    int a_off_m = bx * kTileM;
+    int b_off_n = by * kTileN;
+    int c_off_m = bx * kTileM;
+    int c_off_n = by * kTileN;
 
-    __shared__ __nv_bfloat16 smem_A[BLK_M * BLK_K];
-    __shared__ __nv_bfloat16 smem_B[BLK_K * BLK_N];
-    __shared__ float        smem_C[BLK_M * BLK_N];
+    __shared__ __nv_bfloat16 smem_A[kTileM * kTileK];
+    __shared__ __nv_bfloat16 smem_B[kTileK * kTileN];
+    __shared__ float        smem_C[kTileM * kTileN];
 
     int tid = threadIdx.x;
     int num_threads = blockDim.x;
-    int warp_id = tid / WARP_SIZE;
-    int warp_m  = warp_id / 2;
-    int warp_n  = warp_id % 2;
+    int warp_id = tid / kWarpSize;
+    int warp_m  = warp_id / kWarpsN;
+    int warp_n  = warp_id % kWarpsN;
 
-    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> a_frag;
-    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> b_frag;
-    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag[2][2];
+    wmma::fragment<wmma::matrix_a, kWmmaM, kWmmaN, kWmmaK,
+                   __nv_bfloat16, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, kWmmaM, kWmmaN, kWmmaK,
+                   __nv_bfloat16, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, kWmmaM, kWmmaN, kWmmaK,
+                   float> c_frag[kWarpsM][kWarpsN];
 
-    for (int mi = 0; mi < 2; mi++) {
-        for (int ni = 0; ni < 2; ni++) {
+    for (int mi = 0; mi < kWarpsM; mi++) {
+        for (int ni = 0; ni < kWarpsN; ni++) {
             wmma::fill_fragment(c_frag[mi][ni], 0.0f);
         }
     }
 
-    for (int k_tile = 0; k_tile < K; k_tile += BLK_K) {
+    for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
 
-        for (int i = tid; i < BLK_M * BLK_K; i += num_threads) {
-            int m = i / BLK_K;
-            int k = i % BLK_K;
+        for (int i = tid; i < kTileM * kTileK; i += num_threads) {
+            int m = i / kTileK;
+            int k = i % kTileK;
             int a_row = a_off_m + m;
             int a_col = k_tile + k;
             if (a_row < M && a_col < K) {
@@ -58,9 +67,9 @@ __global__ void gemm_bf16_64x64x64_kernel(
             }
         }
 
-        for (int i = tid; i < BLK_K * BLK_N; i += num_threads) {
-            int k = i / BLK_N;
-            int n = i % BLK_N;
+        for (int i = tid; i < kTileK * kTileN; i += num_threads) {
+            int k = i / kTileN;
+            int n = i % kTileN;
             int b_row = k_tile + k;
             int b_col = b_off_n + n;
             if (b_row < K && b_col < N) {
@@ -72,22 +81,23 @@ __global__ void gemm_bf16_64x64x64_kernel(
 
         __syncthreads();
 
-        for (int k_step = 0; k_step < BLK_K; k_step += 16) {
-            for (int mi = 0; mi < 2; mi++) {
-                for (int ni = 0; ni < 2; ni++) {
-                    int a_m = warp_m * 32 + mi * 16;
+        for (int k_step = 0; k_step < kTileK; k_step += kWmmaK) {
+            for (int mi = 0; mi < kWarpsM; mi++) {
+                for (int ni = 0; ni < kWarpsN; ni++) {
+                    int a_m = warp_m * (kTileM / kWarpsM) + mi * kWmmaM;
                     int a_k = k_step;
                     wmma::load_matrix_sync(a_frag,
-                                           &smem_A[a_m * BLK_K + a_k],
-                                           BLK_K);
+                                           &smem_A[a_m * kTileK + a_k],
+                                           kTileK);
 
                     int b_k = k_step;
-                    int b_n = warp_n * 32 + ni * 16;
+                    int b_n = warp_n * (kTileN / kWarpsN) + ni * kWmmaN;
                     wmma::load_matrix_sync(b_frag,
-                                           &smem_B[b_k * BLK_N + b_n],
-                                           BLK_N);
+                                           &smem_B[b_k * kTileN + b_n],
+                                           kTileN);
 
-                    wmma::mma_sync(c_frag[mi][ni], a_frag, b_frag, c_frag[mi][ni]);
+                    wmma::mma_sync(c_frag[mi][ni], a_frag, b_frag,
+                                   c_frag[mi][ni]);
                 }
             }
         }
@@ -95,22 +105,22 @@ __global__ void gemm_bf16_64x64x64_kernel(
         __syncthreads();
     }
 
-    for (int mi = 0; mi < 2; mi++) {
-        for (int ni = 0; ni < 2; ni++) {
-            int c_m = warp_m * 32 + mi * 16;
-            int c_n = warp_n * 32 + ni * 16;
-            wmma::store_matrix_sync(&smem_C[c_m * BLK_N + c_n],
+    for (int mi = 0; mi < kWarpsM; mi++) {
+        for (int ni = 0; ni < kWarpsN; ni++) {
+            int c_m = warp_m * (kTileM / kWarpsM) + mi * kWmmaM;
+            int c_n = warp_n * (kTileN / kWarpsN) + ni * kWmmaN;
+            wmma::store_matrix_sync(&smem_C[c_m * kTileN + c_n],
                                     c_frag[mi][ni],
-                                    BLK_N,
+                                    kTileN,
                                     wmma::mem_row_major);
         }
     }
 
     __syncthreads();
 
-    for (int i = tid; i < BLK_M * BLK_N; i += num_threads) {
-        int m = i / BLK_N;
-        int n = i % BLK_N;
+    for (int i = tid; i < kTileM * kTileN; i += num_threads) {
+        int m = i / kTileN;
+        int n = i % kTileN;
         int c_row = c_off_m + m;
         int c_col = c_off_n + n;
         if (c_row < M && c_col < N) {
@@ -123,16 +133,16 @@ extern "C" void user_gemm(const __nv_bfloat16* dA,
                           const __nv_bfloat16* dB,
                           __nv_bfloat16* dC,
                           int M, int N, int K) {
-    if (M % BLK_M != 0 || N % BLK_N != 0 || K % BLK_K != 0) {
-        fprintf(stderr, "[user_gemm] ERROR: M,N,K must be multiples of 64. "
-                "Got M=%d N=%d K=%d\n", M, N, K);
+    if (M % kTileM != 0 || N % kTileN != 0 || K % kTileK != 0) {
+        fprintf(stderr, "[user_gemm] ERROR: M,N,K must be multiples of %d. "
+                "Got M=%d N=%d K=%d\n", kTileM, M, N, K);
         return;
     }
 
-    dim3 block(128);
-    dim3 grid(M / BLK_M, N / BLK_N);
+    dim3 block(kThreadsPerBlock);
+    dim3 grid(M / kTileM, N / kTileN);
 
-    gemm_bf16_64x64x64_kernel<<<grid, block>>>(dA, dB, dC, M, N, K);
+    gemm_bf16_kernel<<<grid, block>>>(dA, dB, dC, M, N, K);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
