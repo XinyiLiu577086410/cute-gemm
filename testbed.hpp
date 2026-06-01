@@ -58,6 +58,8 @@ struct CorrectnessResult {
 struct DeviceInfo {
     int sm_count = 0;
     int clock_rate_khz = 0;
+    int memory_clock_khz = 0;
+    int memory_bus_width = 0;
     double theoretical_peak_gflops = 0.0;
     double theoretical_peak_bandwidth_gbs = 0.0;
     std::string name;
@@ -74,13 +76,15 @@ inline DeviceInfo query_device_info(int device_id = 0) {
     info.name = prop.name;
     info.sm_count = prop.multiProcessorCount;
     info.clock_rate_khz = prop.clockRate;
+    info.memory_clock_khz = prop.memoryClockRate;
+    info.memory_bus_width = prop.memoryBusWidth;
     double clock_rate_hz = static_cast<double>(info.clock_rate_khz) * kKhzToHz;
     info.theoretical_peak_gflops =
         static_cast<double>(info.sm_count) * clock_rate_hz
         * kBf16DenseFlopsPerSmPerCycle / kGigaScale;
-    double mem_clock_hz = static_cast<double>(prop.memoryClockRate) * kKhzToHz;
+    double mem_clock_hz = static_cast<double>(info.memory_clock_khz) * kKhzToHz;
     info.theoretical_peak_bandwidth_gbs =
-        mem_clock_hz * (prop.memoryBusWidth / kBitsPerByte)
+        mem_clock_hz * (static_cast<double>(info.memory_bus_width) / kBitsPerByte)
         * kDdrFactor / kGigaScale;
     return info;
 }

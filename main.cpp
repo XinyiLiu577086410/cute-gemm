@@ -82,6 +82,8 @@ static void print_header(const TestConfig& cfg, const DeviceInfo& info) {
     std::cout << "  Device: " << info.name << "\n";
     std::cout << "  SMs: " << info.sm_count
               << ", Clock: " << (info.clock_rate_khz / 1000) << " MHz\n";
+    std::cout << "  Memory: " << (info.memory_clock_khz / 1000) << " MHz"
+              << ", Bus: " << info.memory_bus_width << " bits\n";
     std::cout << "  Theoretical Peak BF16: "
               << std::fixed << std::setprecision(1)
               << info.theoretical_peak_gflops << " GFLOPS\n";
