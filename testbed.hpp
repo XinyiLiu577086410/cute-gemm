@@ -64,7 +64,7 @@ inline DeviceInfo query_device_info(int device_id = 0) {
     info.clock_rate_khz = prop.clockRate;
     double clock_rate_hz = static_cast<double>(info.clock_rate_khz) * 1000.0;
     info.theoretical_peak_gflops =
-        static_cast<double>(info.sm_count) * clock_rate_hz * 2048.0 / 1e9;
+        static_cast<double>(info.sm_count) * clock_rate_hz * 1024.0 / 1e9; // dense not 1:2 spares
     return info;
 }
 
