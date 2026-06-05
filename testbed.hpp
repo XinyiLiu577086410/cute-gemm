@@ -12,14 +12,20 @@
 #include <sstream>
 
 // --- numerical constants with physical meaning ---
-constexpr double kFMAFlops           = 2.0;    // multiply-add = 2 floating-point operations
-constexpr double kBf16DenseFlopsPerSmPerCycle = 1024.0; // dense bf16 FLOPS / SM / cycle (no 1:2 sparsity)
+constexpr double kFMAFlops           = 2.0;
 constexpr double kKhzToHz            = 1000.0;
 constexpr double kMsToSec            = 1000.0;
 constexpr double kGigaScale          = 1e9;
 constexpr double kPctFactor          = 100.0;
-constexpr double kDdrFactor          = 2.0;    // double data rate memory
+constexpr double kDdrFactor          = 2.0;
 constexpr double kBitsPerByte        = 8.0;
+
+// dense bf16 FLOPS per SM per cycle (no 1:2 sparsity), per architecture
+inline constexpr double kDenseBf16FlopsPerSmPerCycle(int sm_major) {
+    if (sm_major >= 9) return 2048.0;  // Hopper
+    if (sm_major >= 8) return 1024.0;  // Ampere
+    return 512.0;                       // Volta/Turing
+}
 
 extern "C" void user_gemm(const __nv_bfloat16* dA,
                           const __nv_bfloat16* dB,
@@ -75,13 +81,16 @@ inline DeviceInfo query_device_info(int device_id = 0) {
     DeviceInfo info;
     info.name = prop.name;
     info.sm_count = prop.multiProcessorCount;
-    info.clock_rate_khz = prop.clockRate;
-    info.memory_clock_khz = prop.memoryClockRate;
-    info.memory_bus_width = prop.memoryBusWidth;
+    cudaDeviceGetAttribute(&info.clock_rate_khz,
+                           cudaDevAttrClockRate, device_id);
+    cudaDeviceGetAttribute(&info.memory_clock_khz,
+                           cudaDevAttrMemoryClockRate, device_id);
+    cudaDeviceGetAttribute(&info.memory_bus_width,
+                           cudaDevAttrGlobalMemoryBusWidth, device_id);
     double clock_rate_hz = static_cast<double>(info.clock_rate_khz) * kKhzToHz;
     info.theoretical_peak_gflops =
         static_cast<double>(info.sm_count) * clock_rate_hz
-        * kBf16DenseFlopsPerSmPerCycle / kGigaScale;
+        * kDenseBf16FlopsPerSmPerCycle(prop.major) / kGigaScale;
     double mem_clock_hz = static_cast<double>(info.memory_clock_khz) * kKhzToHz;
     info.theoretical_peak_bandwidth_gbs =
         mem_clock_hz * (static_cast<double>(info.memory_bus_width) / kBitsPerByte)
