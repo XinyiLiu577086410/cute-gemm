@@ -10,6 +10,7 @@ LDFLAGS    := -lcublas -lcudart
 # Enable:   make DEEPGEMM=1
 ifdef DEEPGEMM
     NVCCFLAGS += -DHAS_DEEPGEMM
+	NVCCFLAGS  := -arch=$(ARCH) -std=$(STD) $(OPT) --expt-relaxed-constexpr -I cutlass/include
 endif
 
 TARGET := testbed
@@ -21,7 +22,7 @@ DEPS   := testbed.hpp data_utils.hpp timing.hpp verify.hpp
 all: $(TARGET)
 
 $(TARGET): $(SRCS) $(DEPS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $(SRCS) $(LDFLAGS)
+	$(NVCC) $(NVCCFLAGS) -o $@ $(SRCS) $(LDFLAGS) -I cutlass/include
 
 clean:
 	rm -f $(TARGET)
