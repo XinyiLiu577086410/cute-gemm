@@ -22,8 +22,8 @@ constexpr double kBitsPerByte        = 8.0;
 
 // dense bf16 FLOPS per SM per cycle (no 1:2 sparsity), per architecture
 inline constexpr double kDenseBf16FlopsPerSmPerCycle(int sm_major) {
-    if (sm_major >= 9) return 2048.0;  // Hopper
-    if (sm_major >= 8) return 1024.0;  // Ampere
+    if (sm_major >= 9) return 4096.0;  // Hopper
+    if (sm_major >= 8) return 2048.0;  // Ampere
     return 512.0;                       // Volta/Turing
 }
 

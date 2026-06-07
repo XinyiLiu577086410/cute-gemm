@@ -1,5 +1,5 @@
 NVCC       ?= nvcc
-ARCH       ?= sm_90
+ARCH       ?= sm_90a
 STD        := c++17
 OPT        := -O3
 NVCCFLAGS  := -arch=$(ARCH) -std=$(STD) $(OPT) --expt-relaxed-constexpr
