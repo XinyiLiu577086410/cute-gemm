@@ -5,7 +5,6 @@
 #include "cutlass/pipeline/sm90_pipeline.hpp"
 #include "cutlass/arch/mma_sm90.h"
 #include "cutlass/arch/barrier.h"
-// #include "cutlass/arch/reg_reconfig.h"
 
 
 using namespace cute;
@@ -39,7 +38,7 @@ template <int kTileM,
           typename TensorTypeC,
           typename TiledMMA>
 __global__ static
-__launch_bounds__(kThreads)
+__launch_bounds__(kThreads, 1)
 void
 gemm_kernel(
     int M, int N, int K,
@@ -94,23 +93,21 @@ gemm_kernel(
     constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
                                         + sizeof(make_tensor_like(tensor<0>(tBsB)));
     // init pipeline
-    CUTE_UNROLL
-    for (int pipe = 0; pipe < kNumStages; ++pipe) {
-        if ((warp_id == 0) && lane_predicate) {
+    if ((warp_id == 0) && lane_predicate) {
+        CUTE_UNROLL
+        for (int pipe = 0; pipe < kNumStages; ++pipe) {
             ProducerBarType::init(&producer_mbar[pipe],   1);
             ConsumerBarType::init(&consumer_mbar[pipe], 128);
         }
-    }
 
-    for (int pipe = 0; pipe < kNumStages; ++pipe) {
-        if ((warp_id == 0) && lane_predicate) {
+        for (int pipe = 0; pipe < kNumStages; ++pipe) {
             // Set expected Tx Bytes after each reset / init
             ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
             copy(tma_a.with(producer_mbar[pipe]), tAgA(_,k_tile), tAsA(_,pipe));
             copy(tma_b.with(producer_mbar[pipe]), tBgB(_,k_tile), tBsB(_,pipe));
+            --k_tile_count;
+            ++k_tile;
         }
-        --k_tile_count;
-        ++k_tile;
     }
     __syncthreads();
 
@@ -132,35 +129,39 @@ gemm_kernel(
     auto write_state = cutlass::PipelineState<kNumStages>();
     auto read_state  = cutlass::PipelineState<kNumStages>();
 
-
-    
-    while(k_tile_count > -kNumStages) {
-        int read_pipe = read_state.index();
-        ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
-        // MMAs to cover 1 K_TILE
-        warpgroup_arrive();
-        gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
-        warpgroup_commit_batch();
-        // Wait for all MMAs in a K_TILE to complete
-        warpgroup_wait<0>();
-        // Notify that consumption is done
-        ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
-        ++read_state;
-
-        if ((warp_id == 0) && lane_predicate && k_tile_count > 0) {
-            int pipe = write_state.index();
-            ConsumerBarType::wait(&consumer_mbar[pipe], write_state.phase());
-            ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
-            copy(tma_a.with(producer_mbar[pipe]), tAgA(_,k_tile), tAsA(_,pipe));
-            copy(tma_b.with(producer_mbar[pipe]), tBgB(_,k_tile), tBsB(_,pipe));
-            ++write_state;
+    if (warpgroup_id == 0) {
+        // TMA warps
+        if ((warp_id == 0) && lane_predicate) {
+            while(k_tile_count) {
+                int pipe = write_state.index();
+                ConsumerBarType::wait(&consumer_mbar[pipe], write_state.phase());
+                ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
+                copy(tma_a.with(producer_mbar[pipe]), tAgA(_,k_tile), tAsA(_,pipe));
+                copy(tma_b.with(producer_mbar[pipe]), tBgB(_,k_tile), tBsB(_,pipe));
+                --k_tile_count;
+                ++write_state;
+                ++k_tile;
+            }
+        }
+    } else if (warpgroup_id == 1)  {
+        while(k_tile_count) {
+            int read_pipe = read_state.index();
+            ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
+            // MMAs to cover 1 K_TILE
+            warpgroup_arrive();
+            gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
+            warpgroup_commit_batch();
+            // Wait for all MMAs in a K_TILE to complete
+            warpgroup_wait<0>();
+            // Notify that consumption is done
+            ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
+            --k_tile_count;
+            ++read_state;
         }
 
-        ++k_tile;
-        --k_tile_count;
+        // store C
+        copy(tCrC, tCgC);
     }
-    // store C
-    copy(tCrC, tCgC);
 }
 
 
@@ -180,7 +181,7 @@ extern "C" void user_gemm(const cute::bfloat16_t* dA, // N
     constexpr int kTileK = 64;
     constexpr int kWarpSize = 32;
     constexpr int kWarpsPerGroup = 4;          // GMMA warp group = 4 warps
-    constexpr int kNumWarpGroups = 1;          // 1 producer + 1 consumer
+    constexpr int kNumWarpGroups = 2;          // 1 producer + 1 consumer
     constexpr int kThreadsPerWG = kWarpSize * kWarpsPerGroup;
     constexpr int kThreads = kThreadsPerWG * kNumWarpGroups;  // 256
     constexpr int kNumStages = 2;
