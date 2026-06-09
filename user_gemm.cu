@@ -184,7 +184,7 @@ extern "C" void user_gemm(const cute::bfloat16_t* dA, // N
     constexpr int kNumWarpGroups = 2;          // 1 producer + 1 consumer
     constexpr int kThreadsPerWG = kWarpSize * kWarpsPerGroup;
     constexpr int kThreads = kThreadsPerWG * kNumWarpGroups;  // 256
-    constexpr int kNumStages = 2;
+    constexpr int kNumStages = 4;
 
     // // A: (BLK_M, BLK_K, Stages), col-major 在 SMEM 中
     // using SmemLayoutA = Layout<
