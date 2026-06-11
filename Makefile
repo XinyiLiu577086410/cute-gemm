@@ -2,7 +2,7 @@ NVCC       ?= nvcc
 ARCH       ?= sm_90a
 STD        := c++17
 OPT        := -O3
-NVCCFLAGS  := -arch=$(ARCH) -std=$(STD) $(OPT) --expt-relaxed-constexpr
+NVCCFLAGS  := -gencode arch=compute_90a,code=sm_90a -std=$(STD) $(OPT) --expt-relaxed-constexpr
 LDFLAGS    := -lcublas -lcudart
 
 # --- DeepGEMM support ---
@@ -10,7 +10,7 @@ LDFLAGS    := -lcublas -lcudart
 # Enable:   make DEEPGEMM=1
 ifdef DEEPGEMM
     NVCCFLAGS += -DHAS_DEEPGEMM
-	NVCCFLAGS  := -arch=$(ARCH) -std=$(STD) $(OPT) --expt-relaxed-constexpr -I cutlass/include
+	NVCCFLAGS  := -gencode arch=compute_90a,code=sm_90a -std=$(STD) $(OPT) --expt-relaxed-constexpr -I cutlass/include
 endif
 
 TARGET := testbed
