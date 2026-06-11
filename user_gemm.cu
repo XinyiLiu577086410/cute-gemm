@@ -9,12 +9,13 @@
 
 using namespace cute;
 
+constexpr int kNumSMs = 132;
+
 template <typename ElementA,
           typename ElementB,
           typename SmemLayoutA,  // (M,K,P)
           typename SmemLayoutB>  // (N,K,P)
 struct SharedStorage {
-    // A 和 B 的 tile buffer (含 pipeline 维度)
     cute::array_aligned<ElementA, cute::cosize_v<SmemLayoutA>> A;
     cute::array_aligned<ElementB, cute::cosize_v<SmemLayoutB>> B;
     uint64_t tma_barrier[size<2>(SmemLayoutA{})];
@@ -63,104 +64,94 @@ gemm_kernel(
     Tensor mB = tma_b.get_tma_tensor(make_shape(N, K));
 
     auto cta_tiler = make_shape(Int<kTileM>{}, Int<kTileN>{}, Int<kTileK>{});
-    auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);
-    
-    Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X, _1>{});
-    Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X, _1, _1>{});
-    Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1, _1, X>{});
 
-    // auto tma_slice_a = tma_a.get_slice(Int<0>{});
-    // auto tma_slice_b = tma_b.get_slice(Int<0>{});
-    // Tensor tAgA = tma_slice_a.partition_S(gA);
-    // Tensor tAsA = tma_slice_a.partition_D(sA);
-    // Tensor tBgB = tma_slice_b.partition_S(gB);
-    // Tensor tBsB = tma_slice_b.partition_D(sB);
-
-    auto [tAgA, tAsA] = tma_partition(tma_a, Int<0>{}, Layout<_1>{},
-                                        group_modes<0,2>(sA), group_modes<0,2>(gA));  // (TMA,k) and (TMA,PIPE)
-
-    auto [tBgB, tBsB] = tma_partition(tma_b, Int<0>{}, Layout<_1>{},
-                                        group_modes<0,2>(sB), group_modes<0,2>(gB));  // (TMA,k) and (TMA,PIPE)
-
-
-    int k_tile_count = size<1>(tAgA);
-    int k_tile = 0;
+    ThrMMA thr_mma = mma.get_thread_slice(threadIdx.x);
+    Tensor tCsA = thr_mma.partition_A(sA);
+    Tensor tCsB = thr_mma.partition_B(sB);
+    Tensor tCrA = thr_mma.make_fragment_A(tCsA);
+    Tensor tCrB = thr_mma.make_fragment_B(tCsB);
 
     uint64_t* producer_mbar = smem.tma_barrier;
     uint64_t* consumer_mbar = smem.mma_barrier;
     using ProducerBarType = cutlass::arch::ClusterTransactionBarrier;
     using ConsumerBarType = cutlass::arch::ClusterBarrier;
-    constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
-                                        + sizeof(make_tensor_like(tensor<0>(tBsB)));
-    // init pipeline
-    if ((warp_id == 0) && lane_predicate) {
-        CUTE_UNROLL
-        for (int pipe = 0; pipe < kNumStages; ++pipe) {
-            ProducerBarType::init(&producer_mbar[pipe],   1);
-            ConsumerBarType::init(&consumer_mbar[pipe], 128);
-        }
 
-        for (int pipe = 0; pipe < kNumStages; ++pipe) {
-            // Set expected Tx Bytes after each reset / init
-            ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
-            copy(tma_a.with(producer_mbar[pipe]), tAgA(_,k_tile), tAsA(_,pipe));
-            copy(tma_b.with(producer_mbar[pipe]), tBgB(_,k_tile), tBsB(_,pipe));
-            --k_tile_count;
-            ++k_tile;
-        }
-    }
-    __syncthreads();
+    int num_m_tiles = M / kTileM;
+    int num_n_tiles = N / kTileN;
+    int num_blocks  = num_m_tiles * num_n_tiles;
 
+    for (int block_idx = blockIdx.x; block_idx < num_blocks; block_idx += kNumSMs) {
+        int m_tile = block_idx % num_m_tiles;
+        int n_tile = block_idx / num_m_tiles;
+        auto cta_coord = make_coord(m_tile, n_tile, _);
 
-    ThrMMA thr_mma = mma.get_thread_slice(threadIdx.x);
-    Tensor tCsA = thr_mma.partition_A(sA);                               // (MMA,MMA_M,MMA_K,PIPE)
-    Tensor tCsB = thr_mma.partition_B(sB);                               // (MMA,MMA_N,MMA_K,PIPE)
-    Tensor tCgC = thr_mma.partition_C(gC);                               // (MMA,MMA_M,MMA_N)
+        Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X, _1>{});
+        Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X, _1, _1>{});
+        Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1, _1, X>{});
 
-    // Allocate accumulators and clear them
-    Tensor tCrC = thr_mma.make_fragment_C(tCgC);                         // (MMA,MMA_M,MMA_N)
-    clear(tCrC);
+        auto [tAgA, tAsA] = tma_partition(tma_a, Int<0>{}, Layout<_1>{},
+                                            group_modes<0,2>(sA), group_modes<0,2>(gA));
+        auto [tBgB, tBsB] = tma_partition(tma_b, Int<0>{}, Layout<_1>{},
+                                            group_modes<0,2>(sB), group_modes<0,2>(gB));
 
-    // Allocate "fragments"
-    Tensor tCrA = thr_mma.make_fragment_A(tCsA);                         // (MMA,MMA_M,MMA_K,PIPE)
-    Tensor tCrB = thr_mma.make_fragment_B(tCsB);                         // (MMA,MMA_N,MMA_K,PIPE)
+        Tensor tCgC = thr_mma.partition_C(gC);
+        Tensor tCrC = thr_mma.make_fragment_C(tCgC);
+        clear(tCrC);
 
+        constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
+                                            + sizeof(make_tensor_like(tensor<0>(tBsB)));
 
-    auto write_state = cutlass::PipelineState<kNumStages>();
-    auto read_state  = cutlass::PipelineState<kNumStages>();
+        int k_tile_count = size<1>(tAgA);
+        int k_tile = 0;
 
-    if (warpgroup_id == 0) {
-        // TMA warps
         if ((warp_id == 0) && lane_predicate) {
-            while(k_tile_count) {
-                int pipe = write_state.index();
-                ConsumerBarType::wait(&consumer_mbar[pipe], write_state.phase());
+            CUTE_UNROLL
+            for (int pipe = 0; pipe < kNumStages; ++pipe) {
+                ProducerBarType::init(&producer_mbar[pipe],   1);
+                ConsumerBarType::init(&consumer_mbar[pipe], 128);
+            }
+            for (int pipe = 0; pipe < kNumStages; ++pipe) {
                 ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
                 copy(tma_a.with(producer_mbar[pipe]), tAgA(_,k_tile), tAsA(_,pipe));
                 copy(tma_b.with(producer_mbar[pipe]), tBgB(_,k_tile), tBsB(_,pipe));
                 --k_tile_count;
-                ++write_state;
                 ++k_tile;
             }
         }
-    } else if (warpgroup_id == 1)  {
-        while(k_tile_count) {
-            int read_pipe = read_state.index();
-            ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
-            // MMAs to cover 1 K_TILE
-            warpgroup_arrive();
-            gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
-            warpgroup_commit_batch();
-            // Wait for all MMAs in a K_TILE to complete
-            warpgroup_wait<0>();
-            // Notify that consumption is done
-            ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
-            --k_tile_count;
-            ++read_state;
+        __syncthreads();
+
+        auto write_state = cutlass::PipelineState<kNumStages>();
+        auto read_state  = cutlass::PipelineState<kNumStages>();
+
+        if (warpgroup_id == 0) {
+            if ((warp_id == 0) && lane_predicate) {
+                while(k_tile_count) {
+                    int pipe = write_state.index();
+                    ConsumerBarType::wait(&consumer_mbar[pipe], write_state.phase());
+                    ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
+                    copy(tma_a.with(producer_mbar[pipe]), tAgA(_,k_tile), tAsA(_,pipe));
+                    copy(tma_b.with(producer_mbar[pipe]), tBgB(_,k_tile), tBsB(_,pipe));
+                    --k_tile_count;
+                    ++write_state;
+                    ++k_tile;
+                }
+            }
+        } else if (warpgroup_id == 1)  {
+            while(k_tile_count) {
+                int read_pipe = read_state.index();
+                ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
+                warpgroup_arrive();
+                gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);
+                warpgroup_commit_batch();
+                warpgroup_wait<0>();
+                ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
+                --k_tile_count;
+                ++read_state;
+            }
+            copy(tCrC, tCgC);
         }
 
-        // store C
-        copy(tCrC, tCgC);
+        __syncthreads();
     }
 }
 
@@ -186,18 +177,6 @@ extern "C" void user_gemm(const cute::bfloat16_t* dA, // N
     constexpr int kThreads = kThreadsPerWG * kNumWarpGroups;  // 256
     constexpr int kNumStages = 4;
 
-    // // A: (BLK_M, BLK_K, Stages), col-major 在 SMEM 中
-    // using SmemLayoutA = Layout<
-    //                         Shape<Int<kTileM>, Int<kTileK>, Int<kNumStages>>,
-    //                         Stride<_1, Int<kTileM>, Int<kTileM * kTileK>>
-    //                     >;
-
-    // // B: (BLK_N, BLK_K, Stages), col-major 在 SMEM 中
-    // using SmemLayoutB = Layout<
-    //                         Shape<Int<kTileN>, Int<kTileK>, Int<kNumStages>>,
-    //                         Stride<Int<kTileN>, _1, Int<kTileN * kTileK>>
-    //                     >;
-    
     auto sA = tile_to_shape(GMMA::Layout_MN_SW128_Atom<cute::bfloat16_t>{}, make_shape(Int<kTileM>{},Int<kTileK>{},Int<kNumStages>{}));
     auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom<cute::bfloat16_t>{}, make_shape(Int<kTileN>{},Int<kTileK>{},Int<kNumStages>{}));
 
@@ -209,12 +188,10 @@ extern "C" void user_gemm(const cute::bfloat16_t* dA, // N
     }
 
     
-    // 创建 TMA 描述符 (host 端)
     auto tensor_a = make_tensor(make_gmem_ptr(dA), make_layout(make_shape(M, K), make_stride(1, M)));
     auto tensor_b = make_tensor(make_gmem_ptr(dB), make_layout(make_shape(N, K), make_stride(K, 1)));
     auto tensor_c = make_tensor(make_gmem_ptr(dC), make_layout(make_shape(M, N), make_stride(1, M)));
 
-    // A: (BLK_M, BLK_K)
     auto tma_load_a = make_tma_atom(
         SM90_TMA_LOAD{},
         tensor_a,
@@ -222,7 +199,6 @@ extern "C" void user_gemm(const cute::bfloat16_t* dA, // N
         make_shape(Int<kTileM>{}, Int<kTileK>{})
     );
 
-    // B: (BLK_N, BLK_K)
     auto tma_load_b = make_tma_atom(
         SM90_TMA_LOAD{},
         tensor_b,
@@ -230,13 +206,14 @@ extern "C" void user_gemm(const cute::bfloat16_t* dA, // N
         make_shape(Int<kTileN>{}, Int<kTileK>{})
     );
 
-    TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F32BF16BF16_SS<GMMA::Major::MN,GMMA::Major::K>{});
+    TiledMMA tiled_mma = make_tiled_mma(SM90_64x128x16_F32BF16BF16_SS<GMMA::Major::MN,GMMA::Major::K>{});
 
     size_t smem_size = sizeof(
         SharedStorage<cute::bfloat16_t, cute::bfloat16_t, decltype(sA), decltype(sB)>);
     
+    int num_blocks = (M / kTileM) * (N / kTileN);
     dim3 dimBlock(kThreads);
-    dim3 dimGrid(M / kTileM, N / kTileN);
+    dim3 dimGrid(num_blocks < kNumSMs ? num_blocks : kNumSMs);
 
     auto kernel_ptr = reinterpret_cast<void const*>(
         &gemm_kernel<kTileM, kTileN, kTileK, kWarpSize, kWarpsPerGroup,
